@@ -6,6 +6,7 @@ import '../services/settings_controller.dart';
 import '../services/storage.dart';
 import '../services/youtube_service.dart';
 import '../utils/time_ago.dart';
+import '../widgets/search_field.dart';
 import 'player_screen.dart';
 
 /// Tab that lists subscribed channels and their latest videos.
@@ -27,6 +28,9 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
   bool _booting = true;
   late int _limit = widget.settings.videosPerChannel;
 
+  final _searchController = TextEditingController();
+  String _query = '';
+
   @override
   void initState() {
     super.initState();
@@ -37,7 +41,17 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
   @override
   void dispose() {
     widget.settings.removeListener(_onSettingsChanged);
+    _searchController.dispose();
     super.dispose();
+  }
+
+  /// Channels whose title matches the current search query.
+  List<Channel> get _filtered {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return _channels;
+    return _channels
+        .where((c) => c.title.toLowerCase().contains(q))
+        .toList();
   }
 
   /// Reload feeds when the "videos per channel" preference changes.
@@ -148,21 +162,61 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _channels.isEmpty
               ? _EmptyState(onAdd: _addChannel)
-              : RefreshIndicator(
-                  onRefresh: _refreshAll,
-                  child: ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
-                    itemCount: _channels.length,
-                    itemBuilder: (_, i) => _ChannelSection(
-                      channel: _channels[i],
-                      videos: _videos[_channels[i].channelId] ?? const [],
-                      loading: _loading.contains(_channels[i].channelId),
-                      limit: _limit,
-                      onRemove: () => _removeChannel(_channels[i]),
-                      onOpenVideo: _openVideo,
+              : Column(
+                  children: [
+                    SearchField(
+                      controller: _searchController,
+                      hintText: 'Search channels',
+                      onChanged: (v) => setState(() => _query = v),
                     ),
-                  ),
+                    Expanded(child: _buildList()),
+                  ],
                 ),
+    );
+  }
+
+  Widget _buildList() {
+    final channels = _filtered;
+    if (channels.isEmpty) {
+      return const _NoResults(message: 'No channels match your search.');
+    }
+    return RefreshIndicator(
+      onRefresh: _refreshAll,
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
+        itemCount: channels.length,
+        itemBuilder: (_, i) => _ChannelSection(
+          channel: channels[i],
+          videos: _videos[channels[i].channelId] ?? const [],
+          loading: _loading.contains(channels[i].channelId),
+          limit: _limit,
+          onRemove: () => _removeChannel(channels[i]),
+          onOpenVideo: _openVideo,
+        ),
+      ),
+    );
+  }
+}
+
+class _NoResults extends StatelessWidget {
+  final String message;
+  const _NoResults({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search_off,
+                size: 56, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 12),
+            Text(message, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
     );
   }
 }
