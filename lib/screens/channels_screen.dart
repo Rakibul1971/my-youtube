@@ -142,7 +142,7 @@ class _ChannelsScreenState extends State<ChannelsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('My YouTube'),
+        title: const Text('MyTube'),
         actions: [
           IconButton(
             tooltip: 'Refresh',

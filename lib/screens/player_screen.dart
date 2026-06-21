@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
@@ -27,6 +29,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   WebViewController? _controller;
   HttpServer? _server;
   bool _loading = true;
+  bool _fullscreen = false;
+  bool _embedBlocked = false;
 
   @override
   void initState() {
@@ -49,6 +53,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final controller = WebViewController.fromPlatformCreationParams(params)
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
+      ..addJavaScriptChannel(
+        'PlayerChannel',
+        onMessageReceived: (msg) {
+          // The IFrame player reports an error code when a video can't be
+          // embedded (e.g. 101/150 = embedding disabled by the owner).
+          if (msg.message == 'error' && mounted) {
+            setState(() => _embedBlocked = true);
+          }
+        },
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (_) {
@@ -85,6 +99,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     player = new YT.Player('player', {
       videoId: '$videoId',
       playerVars: { autoplay: 1, playsinline: 1, rel: 0, modestbranding: 1 },
+      events: {
+        'onError': function(e) {
+          if (window.PlayerChannel) PlayerChannel.postMessage('error');
+        }
+      }
     });
   }
 </script>
@@ -92,15 +111,84 @@ class _PlayerScreenState extends State<PlayerScreen> {
 </html>
 ''';
 
+  Future<void> _openInYouTube() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final uri = Uri.parse(widget.video.watchUrl);
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok) throw 'No app available to open the link.';
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text("Couldn't open YouTube.")),
+      );
+    }
+  }
+
+  void _enterFullscreen() {
+    setState(() => _fullscreen = true);
+    SystemChrome.setPreferredOrientations(
+        [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  void _exitFullscreen() {
+    setState(() => _fullscreen = false);
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
+
   @override
   void dispose() {
+    // Restore normal orientation/system UI if we left while in fullscreen.
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _server?.close(force: true);
     super.dispose();
   }
 
+  Widget _videoSurface() {
+    final controller = _controller;
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Container(color: Colors.black),
+        if (controller != null) WebViewWidget(controller: controller),
+        if (_loading)
+          const Center(child: CircularProgressIndicator(color: Colors.white)),
+        if (_embedBlocked) _EmbedBlockedOverlay(onOpen: _openInYouTube),
+        Positioned(
+          right: 4,
+          bottom: 4,
+          child: IconButton(
+            tooltip: _fullscreen ? 'Exit fullscreen' : 'Fullscreen',
+            icon: Icon(
+              _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+              color: Colors.white,
+            ),
+            onPressed: _fullscreen ? _exitFullscreen : _enterFullscreen,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final controller = _controller;
+    if (_fullscreen) {
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) _exitFullscreen();
+        },
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: Center(
+            child: AspectRatio(aspectRatio: 16 / 9, child: _videoSurface()),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -108,29 +196,62 @@ class _PlayerScreenState extends State<PlayerScreen> {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Open in YouTube',
+            icon: const Icon(Icons.open_in_new),
+            onPressed: _openInYouTube,
+          ),
+        ],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          AspectRatio(
-            aspectRatio: 16 / 9,
-            child: Stack(
-              children: [
-                Container(color: Colors.black),
-                if (controller != null) WebViewWidget(controller: controller),
-                if (_loading)
-                  const Center(
-                    child: CircularProgressIndicator(color: Colors.white),
-                  ),
-              ],
-            ),
-          ),
+          AspectRatio(aspectRatio: 16 / 9, child: _videoSurface()),
           Padding(
             padding: const EdgeInsets.all(16),
             child: Text(
               widget.video.title,
               style: Theme.of(context).textTheme.titleMedium,
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown over the player when YouTube refuses to embed a video.
+class _EmbedBlockedOverlay extends StatelessWidget {
+  final VoidCallback onOpen;
+  const _EmbedBlockedOverlay({required this.onOpen});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.black87,
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.lock_outline, color: Colors.white70, size: 40),
+          const SizedBox(height: 12),
+          const Text(
+            "This video can't be played here.",
+            style: TextStyle(color: Colors.white),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'The owner disabled embedded playback.',
+            style: TextStyle(color: Colors.white70, fontSize: 12),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: onOpen,
+            icon: const Icon(Icons.open_in_new),
+            label: const Text('Open in YouTube'),
           ),
         ],
       ),
