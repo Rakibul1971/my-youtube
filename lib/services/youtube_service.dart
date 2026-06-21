@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 
 import '../models/channel.dart';
+import '../models/saved_video.dart';
 import '../models/video.dart';
 
 /// Reads YouTube's public RSS feeds — no API key required.
@@ -14,6 +17,17 @@ class YoutubeService {
       RegExp(r'<link rel="canonical" href="https://www\.youtube\.com/channel/(UC[\w-]{22})"');
   static final _externalIdRe = RegExp(r'"externalId":"(UC[\w-]{22})"');
   static final _channelIdJsonRe = RegExp(r'"channelId":"(UC[\w-]{22})"');
+
+  // Channel avatar: the channel page exposes it as og:image; the embedded
+  // ytInitialData JSON carries it as an "avatar" thumbnail as a fallback.
+  static final _ogImageRe =
+      RegExp(r'<meta property="og:image" content="([^"]+)"');
+  static final _avatarJsonRe =
+      RegExp(r'"avatar":\{"thumbnails":\[\{"url":"(https://[^"]+?)"');
+
+  static final _bareVideoIdRe = RegExp(r'^[\w-]{11}$');
+  static final _videoUrlRe = RegExp(
+      r'(?:youtu\.be/|/shorts/|/embed/|[?&]v=)([\w-]{11})');
 
   static const _headers = {
     'User-Agent':
@@ -50,6 +64,68 @@ class YoutubeService {
         _channelUrlRe.firstMatch(res.body);
     if (match == null) throw 'Could not find a channel ID for that input.';
     return match.group(1)!;
+  }
+
+  /// Fetches a channel's avatar image URL by scraping its public page.
+  /// Returns null if it can't be found (network error, markup change, etc.).
+  Future<String?> fetchChannelAvatar(String channelId) async {
+    final url = Uri.parse('https://www.youtube.com/channel/$channelId');
+    try {
+      final res = await http.get(url, headers: _headers);
+      if (res.statusCode != 200) return null;
+      final match = _ogImageRe.firstMatch(res.body) ??
+          _avatarJsonRe.firstMatch(res.body);
+      // ytInitialData escapes slashes as \/; normalise before use.
+      return match?.group(1)?.replaceAll(r'\/', '/');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Extracts an 11-character video id from a watch/share/shorts/embed URL or
+  /// a bare id. Returns null when nothing looks like a video id.
+  String? parseVideoId(String input) {
+    final raw = input.trim();
+    if (raw.isEmpty) return null;
+    if (_bareVideoIdRe.hasMatch(raw)) return raw;
+    return _videoUrlRe.firstMatch(raw)?.group(1);
+  }
+
+  /// Resolves a video link into a [SavedVideo], pulling its title, channel and
+  /// thumbnail from YouTube's keyless oEmbed endpoint.
+  Future<SavedVideo> resolveVideo(String input) async {
+    final id = parseVideoId(input);
+    if (id == null) throw 'Could not find a video link or ID in that input.';
+
+    final now = DateTime.now();
+    final oembed = Uri.parse(
+        'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$id&format=json');
+    try {
+      final res = await http.get(oembed, headers: _headers);
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        return SavedVideo(
+          videoId: id,
+          title: (data['title'] as String?)?.trim() ?? 'Video $id',
+          channelTitle: (data['author_name'] as String?)?.trim() ?? '',
+          thumbnail: data['thumbnail_url'] as String?,
+          addedAt: now,
+        );
+      }
+      if (res.statusCode == 401 || res.statusCode == 404) {
+        throw 'That video is private, removed, or unavailable.';
+      }
+    } on FormatException {
+      // Fall through to a minimal entry below.
+    }
+    // Network/format hiccup: still save the id so playback can be attempted.
+    return SavedVideo(
+      videoId: id,
+      title: 'Video $id',
+      channelTitle: '',
+      thumbnail: null,
+      addedAt: now,
+    );
   }
 
   /// Fetches the channel's feed and returns up to [limit] most recent videos
