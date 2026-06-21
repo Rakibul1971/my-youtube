@@ -76,7 +76,7 @@ class SettingsScreen extends StatelessWidget {
             const Divider(),
             const AboutListTile(
               icon: Icon(Icons.info_outline),
-              applicationName: 'My YouTube',
+              applicationName: 'MyTube',
               applicationVersion: '1.0.0',
               aboutBoxChildren: [
                 Text(

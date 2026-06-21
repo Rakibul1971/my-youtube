@@ -19,7 +19,7 @@ class MyYoutubeApp extends StatelessWidget {
     return ListenableBuilder(
       listenable: settings,
       builder: (context, _) => MaterialApp(
-        title: 'My YouTube',
+        title: 'MyTube',
         debugShowCheckedModeBanner: false,
         themeMode: settings.themeMode,
         theme: ThemeData(
