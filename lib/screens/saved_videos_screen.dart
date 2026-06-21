@@ -4,6 +4,7 @@ import '../models/saved_video.dart';
 import '../services/storage.dart';
 import '../services/youtube_service.dart';
 import '../utils/time_ago.dart';
+import '../widgets/search_field.dart';
 import 'player_screen.dart';
 
 /// Tab where the user saves individual videos by pasting their links.
@@ -21,10 +22,30 @@ class _SavedVideosScreenState extends State<SavedVideosScreen> {
   List<SavedVideo> _videos = [];
   bool _booting = true;
 
+  final _searchController = TextEditingController();
+  String _query = '';
+
   @override
   void initState() {
     super.initState();
     _boot();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// Saved videos whose title or channel matches the current search query.
+  List<SavedVideo> get _filtered {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return _videos;
+    return _videos
+        .where((v) =>
+            v.title.toLowerCase().contains(q) ||
+            v.channelTitle.toLowerCase().contains(q))
+        .toList();
   }
 
   Future<void> _boot() async {
@@ -81,15 +102,55 @@ class _SavedVideosScreenState extends State<SavedVideosScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _videos.isEmpty
               ? _EmptyState(onAdd: _addVideo)
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
-                  itemCount: _videos.length,
-                  itemBuilder: (_, i) => _SavedVideoCard(
-                    video: _videos[i],
-                    onTap: () => _open(_videos[i]),
-                    onRemove: () => _remove(_videos[i]),
-                  ),
+              : Column(
+                  children: [
+                    SearchField(
+                      controller: _searchController,
+                      hintText: 'Search saved videos',
+                      onChanged: (v) => setState(() => _query = v),
+                    ),
+                    Expanded(child: _buildList()),
+                  ],
                 ),
+    );
+  }
+
+  Widget _buildList() {
+    final videos = _filtered;
+    if (videos.isEmpty) {
+      return const _NoResults(message: 'No saved videos match your search.');
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 96),
+      itemCount: videos.length,
+      itemBuilder: (_, i) => _SavedVideoCard(
+        video: videos[i],
+        onTap: () => _open(videos[i]),
+        onRemove: () => _remove(videos[i]),
+      ),
+    );
+  }
+}
+
+class _NoResults extends StatelessWidget {
+  final String message;
+  const _NoResults({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search_off,
+                size: 56, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 12),
+            Text(message, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
     );
   }
 }
