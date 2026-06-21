@@ -5,6 +5,12 @@ class Channel {
 
   Channel({required this.channelId, required this.title, this.thumbnail});
 
+  Channel copyWith({String? title, String? thumbnail}) => Channel(
+        channelId: channelId,
+        title: title ?? this.title,
+        thumbnail: thumbnail ?? this.thumbnail,
+      );
+
   Map<String, dynamic> toJson() => {
         'channelId': channelId,
         'title': title,

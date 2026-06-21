@@ -2,18 +2,22 @@ import 'package:flutter/material.dart';
 
 import '../models/channel.dart';
 import '../models/video.dart';
+import '../services/settings_controller.dart';
 import '../services/storage.dart';
 import '../services/youtube_service.dart';
+import '../utils/time_ago.dart';
 import 'player_screen.dart';
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+/// Tab that lists subscribed channels and their latest videos.
+class ChannelsScreen extends StatefulWidget {
+  final SettingsController settings;
+  const ChannelsScreen({super.key, required this.settings});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<ChannelsScreen> createState() => _ChannelsScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _ChannelsScreenState extends State<ChannelsScreen> {
   final _storage = Storage();
   final _yt = YoutubeService();
 
@@ -21,11 +25,26 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<String, List<Video>> _videos = {};
   final Set<String> _loading = {};
   bool _booting = true;
+  late int _limit = widget.settings.videosPerChannel;
 
   @override
   void initState() {
     super.initState();
+    widget.settings.addListener(_onSettingsChanged);
     _boot();
+  }
+
+  @override
+  void dispose() {
+    widget.settings.removeListener(_onSettingsChanged);
+    super.dispose();
+  }
+
+  /// Reload feeds when the "videos per channel" preference changes.
+  void _onSettingsChanged() {
+    if (widget.settings.videosPerChannel == _limit) return;
+    _limit = widget.settings.videosPerChannel;
+    _refreshAll();
   }
 
   Future<void> _boot() async {
@@ -41,13 +60,27 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadChannel(Channel c) async {
     setState(() => _loading.add(c.channelId));
     try {
-      final (_, videos) = await _yt.fetchFeed(c.channelId, limit: 3);
+      final (_, videos) = await _yt.fetchFeed(c.channelId, limit: _limit);
       _videos[c.channelId] = videos;
+      if (c.thumbnail == null) await _backfillAvatar(c);
     } catch (_) {
       _videos[c.channelId] = [];
     } finally {
       if (mounted) setState(() => _loading.remove(c.channelId));
     }
+  }
+
+  /// Fetches and caches a channel's avatar the first time it's missing.
+  Future<void> _backfillAvatar(Channel c) async {
+    final avatar = await _yt.fetchChannelAvatar(c.channelId);
+    if (avatar == null || !mounted) return;
+    setState(() {
+      _channels = _channels
+          .map((x) =>
+              x.channelId == c.channelId ? x.copyWith(thumbnail: avatar) : x)
+          .toList();
+    });
+    await _storage.save(_channels);
   }
 
   Future<void> _addChannel() async {
@@ -65,9 +98,10 @@ class _HomeScreenState extends State<HomeScreen> {
             const SnackBar(content: Text('That channel is already added.')));
         return;
       }
-      final (channel, videos) = await _yt.fetchFeed(id, limit: 3);
+      final (channel, videos) = await _yt.fetchFeed(id, limit: _limit);
+      final avatar = await _yt.fetchChannelAvatar(id);
       setState(() {
-        _channels = [..._channels, channel];
+        _channels = [..._channels, channel.copyWith(thumbnail: avatar)];
         _videos[id] = videos;
       });
       await _storage.save(_channels);
@@ -103,11 +137,13 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addChannel,
-        icon: const Icon(Icons.add),
-        label: const Text('Add channel'),
-      ),
+      floatingActionButton: _channels.isEmpty
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _addChannel,
+              icon: const Icon(Icons.add),
+              label: const Text('Add channel'),
+            ),
       body: _booting
           ? const Center(child: CircularProgressIndicator())
           : _channels.isEmpty
@@ -115,12 +151,13 @@ class _HomeScreenState extends State<HomeScreen> {
               : RefreshIndicator(
                   onRefresh: _refreshAll,
                   child: ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 96),
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
                     itemCount: _channels.length,
                     itemBuilder: (_, i) => _ChannelSection(
                       channel: _channels[i],
                       videos: _videos[_channels[i].channelId] ?? const [],
                       loading: _loading.contains(_channels[i].channelId),
+                      limit: _limit,
                       onRemove: () => _removeChannel(_channels[i]),
                       onOpenVideo: _openVideo,
                     ),
@@ -134,6 +171,7 @@ class _ChannelSection extends StatelessWidget {
   final Channel channel;
   final List<Video> videos;
   final bool loading;
+  final int limit;
   final VoidCallback onRemove;
   final ValueChanged<Video> onOpenVideo;
 
@@ -141,45 +179,67 @@ class _ChannelSection extends StatelessWidget {
     required this.channel,
     required this.videos,
     required this.loading,
+    required this.limit,
     required this.onRemove,
     required this.onOpenVideo,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ListTile(
-          leading: CircleAvatar(
-            child: Text(channel.title.isNotEmpty
-                ? channel.title.characters.first.toUpperCase()
-                : '?'),
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: CircleAvatar(
+              backgroundColor: scheme.primaryContainer,
+              foregroundColor: scheme.onPrimaryContainer,
+              backgroundImage: (channel.thumbnail != null)
+                  ? NetworkImage(channel.thumbnail!)
+                  : null,
+              child: (channel.thumbnail == null)
+                  ? Text(channel.title.isNotEmpty
+                      ? channel.title.characters.first.toUpperCase()
+                      : '?')
+                  : null,
+            ),
+            title: Text(channel.title,
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text(
+                'Latest ${limit == 1 ? 'video' : '$limit videos'}'),
+            trailing: PopupMenuButton<String>(
+              onSelected: (_) => onRemove(),
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'remove',
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.delete_outline),
+                    title: Text('Remove channel'),
+                  ),
+                ),
+              ],
+            ),
           ),
-          title: Text(channel.title,
-              style: const TextStyle(fontWeight: FontWeight.bold)),
-          subtitle: const Text('Latest 3 videos'),
-          trailing: PopupMenuButton<String>(
-            onSelected: (_) => onRemove(),
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'remove', child: Text('Remove channel')),
-            ],
-          ),
-        ),
-        if (loading)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else if (videos.isEmpty)
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Text('No videos found.'),
-          )
-        else
-          ...videos.map((v) => _VideoTile(video: v, onTap: () => onOpenVideo(v))),
-        const Divider(height: 1),
-      ],
+          if (loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (videos.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Text('No videos found.'),
+            )
+          else
+            ...videos.map(
+                (v) => _VideoTile(video: v, onTap: () => onOpenVideo(v))),
+          const SizedBox(height: 4),
+        ],
+      ),
     );
   }
 }
@@ -195,25 +255,11 @@ class _VideoTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.network(
-                video.bestThumbnail,
-                width: 140,
-                height: 79,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  width: 140,
-                  height: 79,
-                  color: Colors.black12,
-                  child: const Icon(Icons.broken_image_outlined),
-                ),
-              ),
-            ),
+            _Thumbnail(url: video.bestThumbnail),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -228,7 +274,7 @@ class _VideoTile extends StatelessWidget {
                   const SizedBox(height: 4),
                   if (video.published != null)
                     Text(
-                      _timeAgo(video.published!),
+                      timeAgo(video.published!),
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                 ],
@@ -239,15 +285,45 @@ class _VideoTile extends StatelessWidget {
       ),
     );
   }
+}
 
-  String _timeAgo(DateTime dt) {
-    final d = DateTime.now().difference(dt);
-    if (d.inDays >= 365) return '${(d.inDays / 365).floor()}y ago';
-    if (d.inDays >= 30) return '${(d.inDays / 30).floor()}mo ago';
-    if (d.inDays >= 1) return '${d.inDays}d ago';
-    if (d.inHours >= 1) return '${d.inHours}h ago';
-    if (d.inMinutes >= 1) return '${d.inMinutes}m ago';
-    return 'just now';
+/// 16:9 thumbnail with rounded corners, a play badge, and graceful fallback.
+class _Thumbnail extends StatelessWidget {
+  final String url;
+  const _Thumbnail({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Image.network(
+            url,
+            width: 140,
+            height: 79,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => Container(
+              width: 140,
+              height: 79,
+              color: Colors.black12,
+              child: const Icon(Icons.broken_image_outlined),
+            ),
+          ),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.black45,
+              shape: BoxShape.circle,
+            ),
+            child: Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(Icons.play_arrow, color: Colors.white, size: 20),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -269,7 +345,8 @@ class _EmptyState extends StatelessWidget {
                 style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
             const Text(
-              'Add a channel by its link, @handle, or UC… ID to see its 3 latest videos.',
+              'Add a channel by its link, @handle, or UC… ID to see its '
+              'latest videos.',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 16),
